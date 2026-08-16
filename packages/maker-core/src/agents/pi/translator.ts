@@ -33,6 +33,10 @@ import {
   formatOverloadRetryMessage,
   parseOverloadError,
 } from '../shared/overload-error.js';
+import {
+  CONTEXT_OVERFLOW_REASON,
+  isContextOverflowErrorMessage,
+} from '../shared/context-overflow-error.js';
 import type { PiRpcEvent } from './rpc-client.js';
 import { parsePiSubagentProgress, type PiSubagentUsage } from './subagent-progress.js';
 
@@ -62,6 +66,7 @@ interface PiPendingAssistantError {
   sdkError: string;
   errorStatus?: 401 | 429 | 529;
   usageLimit?: true;
+  reason?: typeof CONTEXT_OVERFLOW_REASON;
 }
 
 interface PiThinkingBlock {
@@ -292,6 +297,9 @@ function piAssistantErrorOf(rawError: string): PiPendingAssistantError {
     sdkError: redactedError,
     ...(signals.errorStatus !== undefined ? { errorStatus: signals.errorStatus } : {}),
     ...(signals.usageLimit ? { usageLimit: true } : {}),
+    ...(isContextOverflowErrorMessage(redactedError)
+      ? { reason: CONTEXT_OVERFLOW_REASON }
+      : {}),
   };
 }
 
