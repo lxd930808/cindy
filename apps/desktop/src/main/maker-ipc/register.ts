@@ -4193,7 +4193,6 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
       // Keep the raw event for main-side coordination/persistence, but only
       // cross renderer/device-link boundaries with the redacted copy.
       const suppressOverflowBroadcast =
-        session.agentKind === 'pi' &&
         !session.remoteHostId &&
         event.type === 'error' &&
         isTerminalTurnErrorEvent(event) &&
@@ -4322,7 +4321,6 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
             agentInputCoordinatorHolder?.isAutoResumeDeferred(session.id) === true);
         const overflowClaim =
           event.type === 'error' &&
-          session.agentKind === 'pi' &&
           !session.remoteHostId &&
           isTerminalTurnErrorEvent(event) &&
           !isPlannedUpgradeClose &&
@@ -4510,12 +4508,16 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
       }
       if (pendingContextSnapshot) {
         const verifiedWindow = lookupVerifiedContextWindow(
-          (modelId, providerId) =>
-            resolveVerifiedContextWindow(getActiveCatalog(), 'pi', providerId, modelId) ??
-            resolveVerifiedContextWindow(getActiveCatalog(), 'pi', 'xai', modelId) ??
-            resolveVerifiedContextWindow(getActiveCatalog(), 'claude-code', 'xai', modelId),
+          (agentKind, modelId, providerId) =>
+            resolveVerifiedContextWindow(
+              getActiveCatalog(),
+              dbToMakerAgentKind(agentKind),
+              providerId,
+              modelId,
+            ),
           session.model,
           getSessionProvider(session.id),
+          session.agentKind,
         );
         recordSessionContextSnapshot(
           session.id,
@@ -8078,11 +8080,33 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // 解释它)。lazy-create 时刻 DB 行是唯一真源,执行字段无条件对齐。
       co.model = row.model ?? undefined;
       co.resumeSessionId = row.sdkSessionId ?? undefined;
+      if (!row.sdkSessionId && co.vendorOptions) {
+        // context.rebuild clears the DB sdk_session_id. Queued createOpts may
+        // still carry vendor-specific resume/fork anchors from before the close;
+        // strip every native continuation hint so CC/Codex bootstrap fresh too.
+        const freshVendorOptions = { ...co.vendorOptions };
+        for (const key of [
+          'resumeSessionAt',
+          'forkSession',
+          'threadId',
+          'tailTurnsToDrop',
+        ]) {
+          delete freshVendorOptions[key];
+        }
+        co.vendorOptions = Object.keys(freshVendorOptions).length > 0 ? freshVendorOptions : undefined;
+      }
       co.providerId = row.providerId;
       co.effort = (row.effort ?? undefined) as CreateOpts['effort'];
       co.fastMode = !!row.fastMode;
-    } catch {
-      // 校正读库失败按原 opts 继续(与切换功能上线前行为一致)。
+    } catch (error) {
+      // context.rebuild clears sdk_session_id before the next bootstrap. If the
+      // DB truth cannot be read, continuing with caller-supplied opts could
+      // resurrect the dead native resume/fork/thread; fail closed instead.
+      log.warn('lazy-create: DB reconciliation failed; refusing stale native bootstrap', {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
     }
   }
 
@@ -8117,12 +8141,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       findParkedEngineSession(sessionId, targetDbKind),
     applyAgentSwitchToDb: async (sessionId, patch) => {
       const verifiedWindow = lookupVerifiedContextWindow(
-        (modelId, pid) =>
-          resolveVerifiedContextWindow(getActiveCatalog(), dbToMakerAgentKind(patch.agentKind), pid, modelId) ??
-          resolveVerifiedContextWindow(getActiveCatalog(), dbToMakerAgentKind(patch.agentKind), 'xai', modelId) ??
-          resolveVerifiedContextWindow(getActiveCatalog(), 'claude-code', 'xai', modelId),
+        (agentKind, modelId, pid) =>
+          resolveVerifiedContextWindow(
+            getActiveCatalog(),
+            dbToMakerAgentKind(agentKind || patch.agentKind),
+            pid,
+            modelId,
+          ),
         patch.model,
         patch.providerId ?? null,
+        dbToMakerAgentKind(patch.agentKind),
       );
       await applyAgentSwitchToSessionRow(sessionId, {
         ...patch,
@@ -10823,7 +10851,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     if (typeof sessionId !== 'string') return await sendToAgentAcceptedUnlocked(...args);
     await assertReviewExternalInputAllowed(sessionId);
     return await withSendToSessionLock(sessionId, async () => {
-      // 已死的 PI 原生会话不要再 resume/compact：发送前换成干净窗口，交接走 pending handoff。
+      // 已死的本地原生会话不要再 resume/compact：发送前换成干净窗口，交接走 pending handoff。
       await contextOverflowRolloverHolder?.prepareUnhealthySession(sessionId);
       return sendToAgentAcceptedUnlocked(...args);
     });
@@ -10848,13 +10876,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       return row ?? null;
     },
     getAutoCompactThresholdPct: () => readCompactionPct(),
-    resolveVerifiedWindow: (modelId, providerId) => {
+    resolveVerifiedWindow: (agentKind, modelId, providerId) => {
       const catalog = getActiveCatalog();
-      return (
-        resolveVerifiedContextWindow(catalog, 'pi', providerId, modelId) ??
-        resolveVerifiedContextWindow(catalog, 'pi', 'xai', modelId) ??
-        resolveVerifiedContextWindow(catalog, 'claude-code', 'xai', modelId)
-      );
+      const makerAgentKind = dbToMakerAgentKind(agentKind);
+      return resolveVerifiedContextWindow(catalog, makerAgentKind, providerId, modelId);
     },
     listMessages: (sessionId) => listMessagesForAgentHandoff(sessionId, 400),
     findLatestRebuildMeta: findLatestContextRebuildMeta,
@@ -10863,6 +10888,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     drainPersistQueue,
     commitRebuild: async (sessionId, handoff, meta) => {
       const { updatedAt } = await commitContextRebuild(sessionId, handoff, meta);
+      const [sessionKindRow] = await getDbClient()
+        .drizzle.select({ agentKind: sessions.agentKind })
+        .from(sessions)
+        .where(eq(sessions.id, sessionId))
+        .limit(1);
+      const cardAgentKind =
+        sessionKindRow?.agentKind === 'codex'
+          ? 'codex'
+          : sessionKindRow?.agentKind === 'pi'
+            ? 'pi'
+            : 'cc';
       broadcastSessionPatched(sessionId, {
         sdkSessionId: null,
         updatedAt: new Date(updatedAt).toISOString(),
@@ -10871,7 +10907,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         clientId: `context-rebuild-card:${createId()}`,
         role: 'assistant',
         content: '',
-        agentKind: 'pi',
+        agentKind: cardAgentKind,
         agentMeta: {
           contextRebuild: {
             reason: meta.reason,
@@ -12127,12 +12163,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       const agentKind = getSessionDbAgentKind(sessionId);
       if (route.model && agentKind) {
         const verifiedWindow = lookupVerifiedContextWindow(
-          (modelId, pid) =>
-            resolveVerifiedContextWindow(getActiveCatalog(), dbToMakerAgentKind(agentKind), pid, modelId) ??
-            resolveVerifiedContextWindow(getActiveCatalog(), dbToMakerAgentKind(agentKind), 'xai', modelId) ??
-            resolveVerifiedContextWindow(getActiveCatalog(), 'claude-code', 'xai', modelId),
+          (resolvedAgentKind, modelId, pid) =>
+            resolveVerifiedContextWindow(
+              getActiveCatalog(),
+              dbToMakerAgentKind(resolvedAgentKind || agentKind),
+              pid,
+              modelId,
+            ),
           route.model,
           route.providerId ?? null,
+          dbToMakerAgentKind(agentKind),
         );
         if (verifiedWindow) patch.contextWindow = verifiedWindow;
       }
@@ -13710,13 +13750,20 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             }
           }
           if (!response.deferred) {
+            const currentAgentKind =
+              maker.getSession(sessionId)?.agentKind ??
+              dbToMakerAgentKind(getSessionDbAgentKind(sessionId));
             const verifiedWindow = lookupVerifiedContextWindow(
-              (modelId, pid) =>
-                resolveVerifiedContextWindow(getActiveCatalog(), 'pi', pid, modelId) ??
-                resolveVerifiedContextWindow(getActiveCatalog(), 'pi', 'xai', modelId) ??
-                resolveVerifiedContextWindow(getActiveCatalog(), 'claude-code', 'xai', modelId),
+              (agentKind, modelId, pid) =>
+                resolveVerifiedContextWindow(
+                  getActiveCatalog(),
+                  dbToMakerAgentKind(agentKind),
+                  pid,
+                  modelId,
+                ),
               model,
               typeof effectiveProviderId === 'string' ? effectiveProviderId : null,
+              currentAgentKind,
             );
             if (verifiedWindow) {
               const [usage] = await getDbClient()
