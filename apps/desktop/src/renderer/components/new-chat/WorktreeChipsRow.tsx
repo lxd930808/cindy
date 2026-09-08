@@ -610,7 +610,10 @@ function BranchWorktreeChip({
           <button
             type="button"
             onClick={onRetryBranches}
-            className="w-full cursor-pointer rounded-[8px] px-3 py-1.5 text-left text-13 text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+            className={cn(
+              'w-full cursor-pointer rounded-[8px] px-3 py-1.5 text-left text-13 text-muted-foreground hover:bg-accent hover:text-accent-foreground',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]',
+            )}
           >
             {t('newChat.branchChip.loadFailed')}
           </button>
