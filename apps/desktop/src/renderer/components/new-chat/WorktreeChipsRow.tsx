@@ -479,6 +479,16 @@ function BranchWorktreeChip({
     optionRefs.current[clampedActiveIndex]?.scrollIntoView({ block: 'nearest' });
   }, [branchMenuOpen, clampedActiveIndex]);
 
+  // 打开菜单、或菜单开着时分支列表异步到达/刷新,都要把高亮重新定位到当前源
+  // 分支——不能依赖 branches 数组里恰好排第几位(该接口不保证顺序,参见
+  // WorktreeManager.listBranches 用的是 `git branch` 默认序)。只在用户还没
+  // 输入搜索词时接管,避免打断已经在筛选/用方向键挑选的操作。
+  useEffect(() => {
+    if (!branchMenuOpen || normalizedBranchQuery) return;
+    const current = branches.indexOf(branchLabel);
+    setActiveBranchIndex(current >= 0 ? current : 0);
+  }, [branchMenuOpen, branches, branchLabel, normalizedBranchQuery]);
+
   const pickBranch = (branch: string) => {
     onPick(branch);
     setBranchMenuOpen(false);
@@ -490,21 +500,18 @@ function BranchWorktreeChip({
     // Radix 的 Escape 监听在 document 捕获阶段,这里的 stopPropagation 拦不住。)
     if (e.nativeEvent.isComposing) return;
     switch (e.key) {
+      // Home/End 不拦截:焦点有意留在可编辑输入框里(combobox 模式),这两个键要
+      // 保留原生的"光标跳行首/行尾"文本编辑行为;只有方向键才用于选项导航
+      // (对齐仓库里唯一同构的先例 LoginPage.tsx 的 SSO 组织历史下拉,同样没有
+      // 拦截 Home/End)。
       case 'ArrowDown':
-      case 'ArrowUp':
-      case 'Home':
-      case 'End': {
+      case 'ArrowUp': {
         e.preventDefault();
         if (clampedActiveIndex < 0) return;
-        const last = visibleBranches.length - 1;
         setActiveBranchIndex(
-          e.key === 'Home'
-            ? 0
-            : e.key === 'End'
-              ? last
-              : e.key === 'ArrowDown'
-                ? (clampedActiveIndex + 1) % visibleBranches.length
-                : (clampedActiveIndex - 1 + visibleBranches.length) % visibleBranches.length,
+          e.key === 'ArrowDown'
+            ? (clampedActiveIndex + 1) % visibleBranches.length
+            : (clampedActiveIndex - 1 + visibleBranches.length) % visibleBranches.length,
         );
         return;
       }
@@ -573,10 +580,8 @@ function BranchWorktreeChip({
         setBranchMenuOpen(open);
         if (open) {
           onOpenRequested();
-          // 打开即高亮当前源分支(Enter 直接确认它);找不到则高亮首项。
-          // 列表异步到达时下标由 clampedActiveIndex 钳住,不会越界。
-          const current = branches.indexOf(branchLabel);
-          setActiveBranchIndex(current >= 0 ? current : 0);
+          // 高亮定位交给上面的 useEffect(依赖 branches,分支异步到达/刷新时
+          // 会自动重新定位到当前源分支,不再只在“打开那一刻”算一次)。
         } else {
           setBranchQuery('');
         }
