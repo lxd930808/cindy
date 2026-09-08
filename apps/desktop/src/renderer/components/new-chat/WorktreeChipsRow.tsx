@@ -485,12 +485,10 @@ function BranchWorktreeChip({
   };
 
   const onSearchKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-    // IME 组合中的键击属于候选词编辑:导航/Enter 不应触发选择,Escape 只取消候选——
-    // 拦住冒泡,避免 Radix 把弹层连同刚输的搜索词一起关掉(CJK 高频路径)。
-    if (e.nativeEvent.isComposing) {
-      if (e.key === 'Escape') e.stopPropagation();
-      return;
-    }
+    // IME 组合中的键击属于候选词编辑:导航/Enter 不应触发选择。
+    // (组合中的 Escape 不关弹层由 PopoverContent 的 onEscapeKeyDown 拦截——
+    // Radix 的 Escape 监听在 document 捕获阶段,这里的 stopPropagation 拦不住。)
+    if (e.nativeEvent.isComposing) return;
     switch (e.key) {
       case 'ArrowDown':
       case 'ArrowUp':
@@ -588,6 +586,12 @@ function BranchWorktreeChip({
       <PopoverContent
         align="end"
         sideOffset={4}
+        // IME 组合中的 Escape 只是取消候选,不能关弹层(CJK 高频路径)。
+        // 注意 Radix 的 Escape 监听挂在 document 捕获阶段,在输入框里
+        // stopPropagation 拦不住它,必须在 onEscapeKeyDown 里 preventDefault。
+        onEscapeKeyDown={(e) => {
+          if (e.isComposing) e.preventDefault();
+        }}
         className="max-h-[280px] w-auto min-w-[200px] overflow-y-auto rounded-xl border border-border bg-popover p-1 shadow-lg"
       >
         {branchesLoading ? (
