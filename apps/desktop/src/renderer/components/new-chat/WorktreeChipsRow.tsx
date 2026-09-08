@@ -26,17 +26,21 @@
  * worktree 名称 **自动生成**（不暴露 UI），由 useSuggestName 拉取后透传给上层。
  */
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useCallback,
+  useId,
+  type KeyboardEvent,
+} from 'react';
 import { GitBranch, ChevronDown, Folder, MessageCircle, Search } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { cn } from '@/lib/utils';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Tip, Tooltip } from '@/components/ui/tooltip';
 import {
   FolderPickerPopover,
@@ -453,11 +457,70 @@ function BranchWorktreeChip({
 
   // 分支菜单内搜索词(2026-08-20 用户裁决:对齐 Codex 分支选择器,菜单顶部加搜索框)。
   // 菜单关闭即清空——搜索只是本次挑选的临时过滤,不是需要记忆的偏好。
+  const [branchMenuOpen, setBranchMenuOpen] = useState(false);
   const [branchQuery, setBranchQuery] = useState('');
   const normalizedBranchQuery = branchQuery.trim().toLowerCase();
   const visibleBranches = normalizedBranchQuery
     ? branches.filter((b) => b.toLowerCase().includes(normalizedBranchQuery))
     : branches;
+
+  // 组合框键盘导航(2026-09-08 Codex review:改用 aria-activedescendant 组合框结构):
+  // 焦点始终留在输入框,方向键只移动高亮项,Enter 选中高亮项——不再依赖菜单
+  // typeahead 或焦点冒泡,可打印字符输入与选项导航各走各的,互不干扰。
+  const [activeBranchIndex, setActiveBranchIndex] = useState(0);
+  const listboxId = useId();
+  const optionRefs = useRef<Array<HTMLDivElement | null>>([]);
+  // 过滤后列表可能变短,钳住下标避免指向已不可见的项;空列表用 -1 表示无高亮。
+  const clampedActiveIndex =
+    visibleBranches.length === 0 ? -1 : Math.min(activeBranchIndex, visibleBranches.length - 1);
+
+  useEffect(() => {
+    if (!branchMenuOpen || clampedActiveIndex < 0) return;
+    optionRefs.current[clampedActiveIndex]?.scrollIntoView({ block: 'nearest' });
+  }, [branchMenuOpen, clampedActiveIndex]);
+
+  const pickBranch = (branch: string) => {
+    onPick(branch);
+    setBranchMenuOpen(false);
+  };
+
+  const onSearchKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    // IME 组合中的键击属于候选词编辑:导航/Enter 不应触发选择,Escape 只取消候选——
+    // 拦住冒泡,避免 Radix 把弹层连同刚输的搜索词一起关掉(CJK 高频路径)。
+    if (e.nativeEvent.isComposing) {
+      if (e.key === 'Escape') e.stopPropagation();
+      return;
+    }
+    switch (e.key) {
+      case 'ArrowDown':
+      case 'ArrowUp':
+      case 'Home':
+      case 'End': {
+        e.preventDefault();
+        if (clampedActiveIndex < 0) return;
+        const last = visibleBranches.length - 1;
+        setActiveBranchIndex(
+          e.key === 'Home'
+            ? 0
+            : e.key === 'End'
+              ? last
+              : e.key === 'ArrowDown'
+                ? (clampedActiveIndex + 1) % visibleBranches.length
+                : (clampedActiveIndex - 1 + visibleBranches.length) % visibleBranches.length,
+        );
+        return;
+      }
+      case 'Enter': {
+        if (clampedActiveIndex < 0) return;
+        e.preventDefault();
+        pickBranch(visibleBranches[clampedActiveIndex]);
+        return;
+      }
+      default:
+        // Escape 及其余键照常冒泡:Escape 由 Radix Popover 关闭弹层并把焦点还给 trigger。
+        break;
+    }
+  };
 
   const branchSegment = (
     <button
@@ -506,17 +569,26 @@ function BranchWorktreeChip({
   );
 
   const branchArea = branchInteractive ? (
-    <DropdownMenu
+    <Popover
+      open={branchMenuOpen}
       onOpenChange={(open) => {
-        if (open) onOpenRequested();
-        else setBranchQuery('');
+        setBranchMenuOpen(open);
+        if (open) {
+          onOpenRequested();
+          // 打开即高亮当前源分支(Enter 直接确认它);找不到则高亮首项。
+          // 列表异步到达时下标由 clampedActiveIndex 钳住,不会越界。
+          const current = branches.indexOf(branchLabel);
+          setActiveBranchIndex(current >= 0 ? current : 0);
+        } else {
+          setBranchQuery('');
+        }
       }}
     >
-      <DropdownMenuTrigger asChild>{branchTipped}</DropdownMenuTrigger>
-      <DropdownMenuContent
+      <PopoverTrigger asChild>{branchTipped}</PopoverTrigger>
+      <PopoverContent
         align="end"
         sideOffset={4}
-        className="max-h-[280px] min-w-[200px] overflow-y-auto rounded-xl border border-border bg-popover p-1 shadow-lg"
+        className="max-h-[280px] w-auto min-w-[200px] overflow-y-auto rounded-xl border border-border bg-popover p-1 shadow-lg"
       >
         {branchesLoading ? (
           <div className="px-3 py-1.5 text-13 text-muted-foreground">
@@ -524,16 +596,14 @@ function BranchWorktreeChip({
           </div>
         ) : branchesFailed || branches.length === 0 ? (
           /* 失败与空列表都给重试入口(空列表也可能是隧道/瞬时问题);
-             onSelect 阻止默认关闭,重试期间菜单留在原地显示 loading。 */
-          <DropdownMenuItem
-            onSelect={(e) => {
-              e.preventDefault();
-              onRetryBranches();
-            }}
-            className="cursor-pointer rounded-[8px] px-3 py-1.5 text-13 text-muted-foreground focus:bg-accent focus:text-accent-foreground"
+             点击不关闭弹层,重试期间留在原地显示 loading。 */
+          <button
+            type="button"
+            onClick={onRetryBranches}
+            className="w-full cursor-pointer rounded-[8px] px-3 py-1.5 text-left text-13 text-muted-foreground hover:bg-accent hover:text-accent-foreground"
           >
             {t('newChat.branchChip.loadFailed')}
-          </DropdownMenuItem>
+          </button>
         ) : (
           <>
             <div className="sticky top-0 z-10 bg-popover pb-1">
@@ -543,35 +613,29 @@ function BranchWorktreeChip({
                   className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
                 />
                 <input
-                  // 打开菜单的下一个动作几乎总是输入过滤:等 Radix 的 open
-                  // autofocus(rAF 之前的 layout effect)落定后,再把焦点让进输入框。
-                  // 已聚焦时(用户在输入)不重抢。
+                  // 打开菜单的下一个动作几乎总是输入过滤:等 Radix 的 open autofocus
+                  // 落定后再补一次聚焦;已聚焦时(用户在输入)不重抢。
                   ref={(el) => {
                     if (el && document.activeElement !== el) {
                       requestAnimationFrame(() => el.focus());
                     }
                   }}
+                  role="combobox"
+                  aria-expanded
+                  aria-autocomplete="list"
+                  aria-controls={listboxId}
+                  aria-activedescendant={
+                    clampedActiveIndex >= 0
+                      ? `${listboxId}-option-${clampedActiveIndex}`
+                      : undefined
+                  }
                   value={branchQuery}
-                  onChange={(e) => setBranchQuery(e.target.value)}
-                  // Radix 菜单对可打印字符做 item typeahead,会吃掉输入;
-                  // 导航键(箭头/Enter/Escape)放行冒泡,保持键盘可选分支。
-                  onKeyDown={(e) => {
-                    // IME 组合中的 Escape 是"取消候选",不是"关菜单"——留在输入框里,
-                    // 冒泡出去会让 Radix 关掉菜单并清空刚输的搜索词(CJK 高频路径)。
-                    if (e.nativeEvent.isComposing) {
-                      e.stopPropagation();
-                      return;
-                    }
-                    if (
-                      e.key === 'ArrowDown'
-                      || e.key === 'ArrowUp'
-                      || e.key === 'Enter'
-                      || e.key === 'Escape'
-                    ) {
-                      return;
-                    }
-                    e.stopPropagation();
+                  onChange={(e) => {
+                    setBranchQuery(e.target.value);
+                    // 过滤集合变了,高亮回到首项,避免停留在已不可见的位置。
+                    setActiveBranchIndex(0);
                   }}
+                  onKeyDown={onSearchKeyDown}
                   placeholder={t('newChat.branchChip.searchPlaceholder')}
                   aria-label={t('newChat.branchChip.searchPlaceholder')}
                   className={cn(
@@ -591,24 +655,34 @@ function BranchWorktreeChip({
                 {t('newChat.branchChip.noMatch')}
               </div>
             ) : (
-              visibleBranches.map((b) => (
-                <DropdownMenuItem
-                  key={b}
-                  onSelect={() => onPick(b)}
-                  className={cn(
-                    'cursor-pointer rounded-[8px] px-3 py-1.5 text-13 text-foreground',
-                    'focus:bg-accent focus:text-accent-foreground',
-                    b === branchLabel && 'bg-accent/60',
-                  )}
-                >
-                  {b}
-                </DropdownMenuItem>
-              ))
+              <div role="listbox" id={listboxId} aria-label={t('newChat.branchChip.label')}>
+                {visibleBranches.map((b, index) => (
+                  <div
+                    key={b}
+                    ref={(el) => {
+                      optionRefs.current[index] = el;
+                    }}
+                    id={`${listboxId}-option-${index}`}
+                    role="option"
+                    aria-selected={b === branchLabel}
+                    onMouseMove={() => setActiveBranchIndex(index)}
+                    onClick={() => pickBranch(b)}
+                    className={cn(
+                      'cursor-pointer rounded-[8px] px-3 py-1.5 text-13 text-foreground',
+                      index === clampedActiveIndex
+                        ? 'bg-accent text-accent-foreground'
+                        : b === branchLabel && 'bg-accent/60',
+                    )}
+                  >
+                    {b}
+                  </div>
+                ))}
+              </div>
             )}
           </>
         )}
-      </DropdownMenuContent>
-    </DropdownMenu>
+      </PopoverContent>
+    </Popover>
   ) : (
     branchTipped
   );
