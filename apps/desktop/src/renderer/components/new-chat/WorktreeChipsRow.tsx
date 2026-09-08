@@ -492,6 +492,7 @@ function BranchWorktreeChip({
   const pickBranch = (branch: string) => {
     onPick(branch);
     setBranchMenuOpen(false);
+    setBranchQuery('');
   };
 
   const onSearchKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
@@ -659,35 +660,41 @@ function BranchWorktreeChip({
                 />
               </div>
             </div>
-            {visibleBranches.length === 0 ? (
-              <div className="px-3 py-1.5 text-13 text-muted-foreground">
-                {t('newChat.branchChip.noMatch')}
-              </div>
-            ) : (
-              <div role="listbox" id={listboxId} aria-label={t('newChat.branchChip.label')}>
-                {visibleBranches.map((b, index) => (
-                  <div
-                    key={b}
-                    ref={(el) => {
-                      optionRefs.current[index] = el;
-                    }}
-                    id={`${listboxId}-option-${index}`}
-                    role="option"
-                    aria-selected={b === branchLabel}
-                    onMouseMove={() => setActiveBranchIndex(index)}
-                    onClick={() => pickBranch(b)}
-                    className={cn(
-                      'cursor-pointer rounded-[8px] px-3 py-1.5 text-13 text-foreground',
-                      index === clampedActiveIndex
-                        ? 'bg-accent text-accent-foreground'
-                        : b === branchLabel && 'bg-accent/60',
-                    )}
-                  >
-                    {b}
-                  </div>
-                ))}
-              </div>
-            )}
+            <div role="listbox" id={listboxId} aria-label={t('newChat.branchChip.label')}>
+              {visibleBranches.map((b, index) => (
+                <div
+                  key={b}
+                  ref={(el) => {
+                    optionRefs.current[index] = el;
+                  }}
+                  id={`${listboxId}-option-${index}`}
+                  role="option"
+                  aria-selected={b === branchLabel}
+                  onMouseMove={() => setActiveBranchIndex(index)}
+                  onClick={() => pickBranch(b)}
+                  className={cn(
+                    'cursor-pointer rounded-[8px] px-3 py-1.5 text-13 text-foreground',
+                    index === clampedActiveIndex
+                      ? 'bg-accent text-accent-foreground'
+                      : b === branchLabel && 'bg-accent/60',
+                  )}
+                >
+                  {b}
+                </div>
+              ))}
+            </div>
+            {/* 常驻播报区域，让过滤为空时的文本更新可被读屏感知；列表关联始终保留。 */}
+            <div
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+              className={cn(
+                'text-13 text-muted-foreground',
+                visibleBranches.length === 0 && 'px-3 py-1.5',
+              )}
+            >
+              {visibleBranches.length === 0 ? t('newChat.branchChip.noMatch') : null}
+            </div>
           </>
         )}
       </PopoverContent>
