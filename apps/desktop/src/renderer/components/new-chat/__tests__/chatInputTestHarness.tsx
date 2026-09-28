@@ -1,16 +1,45 @@
 // Shared ChatInput integration harness: real editor and draft state, inert host services.
 import { cleanup } from '@testing-library/react';
 import { afterEach, beforeEach, vi } from 'vitest';
-import type { ComponentProps } from 'react';
+import type { ComponentProps, ReactNode } from 'react';
 import type { Editor } from '@tiptap/react';
+import type { ProviderView } from '@cindy/model-providers';
 import type { ChatInput } from '../ChatInput';
 
-const h = vi.hoisted(() => ({ t: (key: string) => key, confirm: vi.fn(), editor: null as Editor | null, listening: false, stop: vi.fn().mockResolvedValue(undefined) }));
+const h = vi.hoisted(() => ({ t: (key: string) => key, confirm: vi.fn(), editor: null as Editor | null, listening: false, stop: vi.fn().mockResolvedValue(undefined),
+  setModel: vi.fn(), selectModel: undefined as undefined | ((id: string) => Promise<void | boolean>), remoteProviders: [] as ProviderView[],
+  remoteStatus: 'ready' as 'ready' | 'loading' | 'error',
+}));
 export { h };
 vi.mock('react-i18next', async (original) => ({ ...await original<typeof import('react-i18next')>(), useTranslation: () => ({ t: h.t }) }));
 vi.mock('react-router-dom', () => ({ useNavigate: () => vi.fn() }));
 vi.mock('@/components/ui/confirm-dialog-provider', () => ({ useConfirmDialog: () => ({ confirm: h.confirm }) }));
-vi.mock('../ModelSelector', async (original) => ({ ...await original<typeof import('../ModelSelector')>(), ModelSelector: ({ modelId }: { modelId: string }) => <span data-testid="model-selector">{modelId}</span> }));
+vi.mock('@/components/sidebar/SortableList', () => ({
+  SortableList: ({
+    items,
+    renderItem,
+    role,
+    ariaLabel,
+    className,
+  }: {
+    items: readonly unknown[];
+    renderItem: (item: unknown, index: number) => ReactNode;
+    role?: string;
+    ariaLabel?: string;
+    className?: string;
+  }) => (
+    <div role={role} aria-label={ariaLabel} className={className}>
+      {items.map((item, index) => (
+        <div key={index}>{renderItem(item, index)}</div>
+      ))}
+    </div>
+  ),
+}));
+vi.mock('../ModelSelector', async (original) => ({ ...await original<typeof import('../ModelSelector')>(), ModelSelector: ({ modelId, onModelChange }: { modelId: string; onModelChange: typeof h.selectModel }) => {
+  h.selectModel = onModelChange;
+  return <span data-testid="model-selector">{modelId}</span>;
+} }));
+vi.mock('@/hooks/useSshCodexProviders', () => ({ useSshCodexProviders: () => ({ providers: h.remoteProviders, status: h.remoteStatus, refresh: () => {} }) }));
 vi.mock('../ExtraDirsButton', () => ({ ExtraDirsButton: () => null }));
 vi.mock('../PermissionSelector', () => ({ PermissionSelector: () => <span data-testid="permission-selector" /> }));
 vi.mock('../NewGoalDialog', () => ({ NewGoalDialog: () => null }));
@@ -40,6 +69,7 @@ vi.mock('@/state/newMakerDraft', async (original) => {
 const noOp = () => {};
 // External host services are inert; the editor, composer state, and send dispatch run unchanged.
 const api = new Proxy({} as typeof window.electronAPI, { get: (_obj, key) => {
+  if (key === 'setModel') return h.setModel;
   if (key === 'listSync') return () => ({ ghosts: [] });
   if (key === 'getDataSnapshot') return () => { throw new Error('test bridge unavailable'); };
   if (key === 'setGlobalShortcut') return () => Promise.resolve({ ok: true });
@@ -56,7 +86,7 @@ const attachments: ComponentProps<typeof ChatInput>['attachmentState'] = {
   removeFile: noOp, updateFile: noOp, discardFiles: noOp, clearFiles: noOp, restoreFiles: (files) => [...files],
 };
 beforeEach(() => { h.editor = null; h.listening = false; h.stop.mockClear(); window.electronAPI = api; vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} }); });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); h.remoteProviders = []; h.remoteStatus = 'ready'; h.setModel.mockReset(); h.confirm.mockReset(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 export const props = {
   sessionId: 'loading-test', initialWorkingDir: '/workspace', runtimeAgentKind: 'codex' as const,
